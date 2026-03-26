@@ -1,0 +1,13 @@
+pytest~=7.4.4
+boto3~=1.36.3
+requests~=2.32.3
+pyjwt
+ujson
+pymysql~=1.1.1
+matplotlib~=3.9.2
+botocore~=1.36.3
+pandas~=2.2.2
+sqlalchemy~=2.0.34
+pathos~=0.3.4
+setuptools~=78.1.0
+aiohttp~=3.10.5
