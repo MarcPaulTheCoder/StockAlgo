@@ -2,28 +2,30 @@
 
 A Python-based stock market data pipeline that pulls financial data from the Alpha Vantage API, processes it through a normalized MySQL database on AWS RDS, computes technical indicators via stored procedures, and surfaces the results through presentation views consumed by a Power BI dashboard.
 
+**Scale:** 325M+ rows in the core financial data table. 1.6B+ rows across all tables (each indicator table holds ~280M rows). 52 tables/views with hash partitioning (100 partitions) on the primary data table. 25-worker concurrent ingestion pool.
+
 ## Architecture
 
 ```
-Alpha Vantage API
+Alpha Vantage API (13 endpoints)
        |
        v
-  main.py (Python, async + multiprocessing)
+  main.py (Python, asyncio + multiprocessing, 25 workers)
        |
        v
-  AWS Secrets Manager (API keys, DB credentials)
+  AWS Secrets Manager (API keys, DB credentials via IAM auth)
        |
        v
-  Raw tables (MySQL on AWS RDS)
+  Raw staging tables (MySQL 8.0 on AWS RDS)
        |
        v
-  Scheduled Events (raw-to-processed ETL)
+  Scheduled Events (8 events, 1-min intervals, GET_LOCK concurrency control)
        |
        v
-  Stored Procedures (technical indicator calculations)
+  Stored Procedures (ETL + technical indicator calculations)
        |
        v
-  Presentation Views
+  Presentation Views (14 views)
        |
        v
   Power BI Dashboard
@@ -44,30 +46,34 @@ The application retrieves stock market data for a configurable list of tickers a
 ## Project Structure
 
 ```
-├── main.py                        # Entry point — async data ingestion
+├── main.py                        # Entry point: async data ingestion
 ├── AwsSecrets.py                  # AWS Secrets Manager integration
 ├── requirements.txt               # Python dependencies
 ├── DatabaseLogic/
 │   ├── AlphaVantage/
 │   │   ├── AlphaVantageConn.py    # API client initialization
-│   │   └── GetData.py             # Data retrieval methods
+│   │   └── GetData.py             # Data retrieval methods (13 endpoints)
 │   ├── DatabaseFunc/
-│   │   ├── MySqlDBConnection.py   # MySQL connection via IAM auth
-│   │   └── InsertData.py          # Raw data insertion logic
+│   │   ├── MySqlDBConnection.py   # MySQL connection via IAM auth + SSL
+│   │   └── InsertData.py          # Raw data insertion (bulk, chunked)
 │   └── FormatData/
 │       └── FormatData.py          # DataFrame formatting for DB insert
 ├── priv_alpha_vantage/            # Forked alpha_vantage library (see below)
 ├── mysql_database/
-│   ├── Demo_db_full_schema.sql    # Full schema export (tables, views, procedures, events)
+│   ├── Demo_db_full_schema.sql    # Full schema (tables, views, procedures, events)
 │   └── DemoDb_ERD.drawio          # Entity-relationship diagram (draw.io)
 └── AllTickers.csv                 # Reference list of all ticker symbols
 ```
 
 ## Database
 
-The database schema includes 35+ tables organized into three tiers: raw staging tables that hold unprocessed API responses, processed tables with normalized and deduplicated data, and technical indicator tables that store computed analysis results.
+The database schema includes 35+ tables organized into three tiers:
 
-The full schema — including all tables, primary keys, indexes, views, stored procedures, and scheduled events — is available in `mysql_database/Demo_db_full_schema.sql`. The ERD is in `mysql_database/DemoDb_ERD.drawio` (open with [draw.io](https://app.diagrams.net/)).
+- **Raw staging tables** hold unprocessed API responses (`rawfinancialdata`, `RawBalanceSheet`, `RawCashFlow`, `RawNews`, etc.)
+- **Processed tables** contain normalized and deduplicated data (`FinancialData`, `BalanceSheet`, `NewsArticle`, etc.)
+- **Technical indicator tables** store computed analysis results (`boilerband`, `macd`, `chaikinoscillator`, `directionalmovement`, `sar`)
+
+The full schema, including all tables, primary keys, indexes, views, stored procedures, and scheduled events, is available in `mysql_database/Demo_db_full_schema.sql`. The ERD is in `mysql_database/DemoDb_ERD.drawio` (open with [draw.io](https://app.diagrams.net/)).
 
 **Stored procedures** handle raw-to-processed ETL (e.g., `rawFinancialDataToFinancialData`, `RawNewsToNews`), technical indicator computation (e.g., `AnalyzeBoilerBand`, `AnalyzeMACD`, `CreateUpdateSarSlope`), trend detection and change tracking (e.g., `CreateUpdateADXTrendDirection`, `CreateUpdateMacdTrendChange`), and data maintenance (e.g., `CreateFinancialDataParentChild`, `UpdatePresentationStocks`).
 
@@ -82,8 +88,6 @@ The `priv_alpha_vantage/` directory contains a [forked version](https://github.c
 Python 3, pandas, asyncio, multiprocessing, SQLAlchemy, PyMySQL, boto3, AWS RDS (MySQL 8.0), AWS Secrets Manager, Alpha Vantage API, Power BI.
 
 ## Environment Variables
-
-The application requires the following environment variables:
 
 | Variable | Description |
 |---|---|
