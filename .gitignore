@@ -251,3 +251,9 @@ $RECYCLE.BIN/
 */build/*
 
 # End of https://www.gitignore.io/api/osx,linux,python,windows,pycharm,visualstudiocode
+pyrightconfig.json
+output/
+dumps/
+*.pyc
+__pycache__/
+.env
