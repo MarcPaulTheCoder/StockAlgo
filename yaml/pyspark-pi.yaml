@@ -1,0 +1,39 @@
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: pyspark-pi
+  namespace: default
+spec:
+  volumes:
+    - name: nfs-stockalgo
+      nfs:
+        server: 192.168.20.13
+        path: /mnt/fast/workspaces/stockAlgo
+  type: Python
+  mainApplicationFile: local:///mnt/data/pyspark/alpaca-ingest.py
+  sparkVersion: "4.0.0"
+  mode: cluster
+  image: marcpaulthecoder/stockalgo:latest
+  imagePullPolicy: Always
+  driver:
+    volumeMounts:
+      - name: nfs-stockalgo
+        mountPath: /mnt/data
+    env:
+      - name: ALPACA_KEY
+        valueFrom:
+          secretKeyRef:
+            name: alpaca-paper-secret
+            key: KEY
+      - name: ALPACA_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: alpaca-paper-secret
+            key: SECRET
+    cores: 1
+    memory: "2g"
+    serviceAccount: spark-release-spark-operator-spark
+  executor:
+    cores: 1
+    memory: "2g"
+    instances: 2

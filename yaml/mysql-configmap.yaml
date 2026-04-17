@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql
+  labels:
+    app: mysql
+data:
+  primary.cnf: |
+    [mysqld]
+    bind-address=0.0.0.0
+    log-bin
+    server-id=1
+    gtid_mode=ON
+    enforce-gtid-consistency=ON
+
+  replica.cnf: |
+    [mysqld]
+    bind-address=0.0.0.0
+    super-read-only
+    server-id=2
+    gtid_mode=ON
+    event_scheduler=OFF
+    enforce-gtid-consistency=ON
+    log-replica-updates=ON
+    skip-replica-start=ON

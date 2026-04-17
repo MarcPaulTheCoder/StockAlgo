@@ -1,0 +1,4 @@
+alpaca-py
+pandas
+numpy
+pyarrow==15.0.0
