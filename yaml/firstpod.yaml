@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: stockalgop
+spec:
+  volumes:
+    - name: fastdata
+      persistentVolumeClaim:
+        claimName: fast-nfs-pvc
+  containers:
+    - name: stockalgop 
+      image: marcpaulthecoder/stockalgo
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - name: fastdata
+          mountPath: /srv/nas/fast

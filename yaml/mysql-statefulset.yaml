@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+spec:
+  selector:
+    matchLabels:
+      app: mysql
+  serviceName: mysql
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      initContainers:
+        - name: primary-secondary-cnf-picker
+          image: mysql:8.0.42
+          command:
+            - sh
+            - "-c"
+            - |
+              pod_hostname=$(cat /etc/hostname)
+              if [ "$pod_hostname" = "mysql-0" ]; then
+                cp /mnt/mconfig/map/primary.cnf /etc/mysql/conf.d/
+              else
+                cp /mnt/mconfig/map/replica.cnf /etc/mysql/conf.d/
+              fi
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/mysql/conf.d
+            - name: allmyconf
+              mountPath: /mnt/mconfig/map
+      containers:
+        - name: mysql
+          image: mysql:8.0.42
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_ROOT_PASSWORD
+            - name: MYSQL_DATABASE
+              value: stocks
+          ports:
+            - name: mysql
+              containerPort: 3306
+          resources:
+            requests:
+              memory: 64Gi
+          volumeMounts:
+            - name: fast-nfs-pvc
+              mountPath: /var/lib/mysql
+            - name: conf
+              mountPath: /etc/mysql/conf.d
+      volumes:
+        - name: conf
+          emptyDir:
+            sizeLimit: 500Mi
+        - name: allmyconf
+          configMap:
+            name: mysql
+  volumeClaimTemplates:
+    - metadata:
+        name: fast-nfs-pvc
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Ti
