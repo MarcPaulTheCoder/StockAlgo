@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: logs-airflow-triggerer-0-pv
+  labels:
+    release: airflow
+    tier: airflow
+spec:
+  claimRef:
+    name: logs-airflow-triggerer-0
+    namespace: airflow
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: "192.168.20.13"
+    path: "/mnt/fast/workspaces/airflow/logs"
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: airflow-postgresql-pv
+  labels:
+    app.kubernetes.io/instance: airflow
+    app.kubernetes.io/name: postgresql
+spec:
+  claimRef:
+    name: data-airflow-postgresql-0
+    namespace: airflow
+  capacity:
+    storage: 8Gi
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: "192.168.20.13"
+    path: "/mnt/fast/workspaces/airflow/postgresql"
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: airflow-dags-pv
+  labels:
+    app.kubernetes.io/instance: airflow
+spec:
+  claimRef:
+    name: airflow-dags-pvc
+    namespace: airflow
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteMany
+  volumeMode: Filesystem
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: "192.168.20.13"
+    path: "/mnt/fast/workspaces/airflow/dags"
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: airflow-task-logs-pv
+  labels:
+    app.kubernetes.io/instance: airflow
+spec:
+  claimRef:
+    name: airflow-task-logs-pvc
+    namespace: airflow
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteMany
+  volumeMode: Filesystem
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: "192.168.20.13"
+    path: "/mnt/fast/workspaces/airflow/task-logs"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: airflow-task-logs-pvc
+  namespace: airflow
+  labels:
+    app.kubernetes.io/instance: airflow
+    app.kubernetes.io/name: task-logs
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  volumeMode: Filesystem
