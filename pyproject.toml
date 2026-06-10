@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stockalgo"
+version = "0.1.0"
+description = "Distributed stock-data ingest + indicator pipeline on Spark/Iceberg"
+requires-python = ">=3.10"
+dependencies = [
+    "alpaca-py",
+    "pandas",
+    "pyarrow",
+]
+
+[project.scripts]
+stockalgo = "stockalgo.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

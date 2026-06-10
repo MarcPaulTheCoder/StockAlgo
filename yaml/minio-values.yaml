@@ -1,0 +1,22 @@
+mode: standalone
+existingSecret: minio-root-secret
+persistence:
+  enabled: true
+  existingClaim: minio
+  size: 200Gi
+resources:
+  requests:
+    memory: 1Gi
+    cpu: 500m
+service:
+  type: NodePort
+  port: 9000
+  nodePort: 30900
+consoleService:
+  type: NodePort
+  port: 9090
+  nodePort: 30901
+buckets:
+  - name: stockalgo
+    policy: none
+    purge: false

@@ -18,3 +18,5 @@ CREATE TABLE IF NOT EXISTS stock_indicator_data (`symbol` string, `time_stamp` t
     `three_day_ema` double, `ten_day_ema` double,
     `dx` double, `chaikin_ad` double) USING iceberg PARTITIONED BY (bucket(16,`symbol`));
 
+CREATE TABLE IF NOT EXISTS company_info (`company` string, `symbol` string, `exchange` string, `asset_type` string, `sector` string, `industry` string, 
+    `active` boolean, `active_from` timestamp, `deactivated_from` timestamp) USING iceberg;

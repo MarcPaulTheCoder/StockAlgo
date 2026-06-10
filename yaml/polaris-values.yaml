@@ -1,0 +1,39 @@
+replicas: 1
+persistence:
+  type: relational-jdbc
+  relationalJdbc:
+    secret:
+      name: polaris-persistence-secret
+      username: username
+      password: password
+      jdbcUrl: jdbcUrl
+service:
+  type: NodePort
+  ports:
+    - name: polaris-service
+      port: 8181
+      nodePort: 30818
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "2"
+    memory: "2Gi"
+extraEnv:
+  - name: AWS_REGION
+    value: "us-east-1"
+  - name: AWS_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: polaris-creds
+        key: AWS_ACCESS_KEY_ID
+  - name: AWS_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: polaris-creds
+        key: AWS_SECRET_ACCESS_KEY
+  - name: AWS_ENDPOINT_URL_STS
+    value: "http://minio.minio.svc.cluster.local:9000"
+  - name: AWS_ENDPOINT_URL_S3
+    value: "http://minio.minio.svc.cluster.local:9000"

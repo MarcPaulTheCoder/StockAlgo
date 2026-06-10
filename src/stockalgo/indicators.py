@@ -1,59 +1,22 @@
-import os
-from datetime import datetime
-from pyspark.sql import SparkSession, Window, functions as func
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from pyspark.sql import Window, functions as func
 from pyspark.sql.types import DoubleType
-from pyspark.sql.functions import col
+from pyspark.sql.functions import col, lit
+from stockalgo.connections import spark_connect
+from stockalgo.ingest import get_symbols
 
 
-def spark_connect():
-    spark = (
-        SparkSession.builder.appName("alpaca-ingest")
-        .config("spark.sql.artifact.rootDirectory", "/tmp/spark-artifacts")
-        .config("spark.sql.scripting.enabled", "true")
-        .getOrCreate()
+def sma_sql(sparkdf, spark, numObs=5):
+    sparkdf = sparkdf.drop(
+        col("StartDate"), col("EndDate"), col("sma"), col("LagClose")
     )
-    return spark
-
-
-def alpaca_historical_data_connect():
-    client = StockHistoricalDataClient(
-        os.getenv(key="ALPACA_KEY"), os.getenv(key="ALPACA_SECRET")
-    )
-    return client
-
-
-def getstockbardata(client, spark, symbols, datefrom=None, dateto=datetime.today()):
-
-    if datefrom is None:
-        apicall = StockBarsRequest(
-            symbol_or_symbols=symbols, timeframe=TimeFrame.Day, end=dateto
-        )
-    else:
-        apicall = StockBarsRequest(
-            symbol_or_symbols=symbols,
-            timeframe=TimeFrame.Day,
-            start=datefrom,
-            end=dateto,
-        )
-
-    temp = client.get_stock_bars(apicall).df.reset_index()
-    sparkdf = spark.createDataFrame(temp)
-    return sparkdf
-
-
-def sma_sql(sparkdf, spark, numObs):
-    numObs = 5
     sparkdf.createOrReplaceTempView("smatbl")
     smadf = spark.sql(
         """
-              SELECT symbol, timestamp, open, high, low, close, volume, trade_count, vwap,
-              LAG(close) OVER (PARTITION BY symbol ORDER BY timestamp ASC) AS  LagClose,
-              MIN(`timestamp`)  OVER ( PARTITION BY `symbol` ORDER BY `timestamp` ASC ROWS BETWEEN {numObservations}  PRECEDING AND CURRENT ROW) AS StartDate,
-              MAX(`timestamp`)  OVER ( PARTITION BY `symbol` ORDER BY `timestamp` ASC ROWS BETWEEN {numObservations}  PRECEDING AND CURRENT ROW) AS EndDate,
-              AVG(`close`) OVER ( PARTITION BY `symbol` ORDER BY `timestamp` ASC ROWS BETWEEN {numObservations} PRECEDING AND CURRENT ROW) AS sma
+              SELECT *,
+              LAG(close) OVER (PARTITION BY symbol ORDER BY time_stamp ASC) AS  LagClose,
+              MIN(`time_stamp`)  OVER ( PARTITION BY `symbol` ORDER BY `time_stamp` ASC ROWS BETWEEN {numObservations}  PRECEDING AND CURRENT ROW) AS StartDate,
+              MAX(`time_stamp`)  OVER ( PARTITION BY `symbol` ORDER BY `time_stamp` ASC ROWS BETWEEN {numObservations}  PRECEDING AND CURRENT ROW) AS EndDate,
+              AVG(`close`) OVER ( PARTITION BY `symbol` ORDER BY `time_stamp` ASC ROWS BETWEEN {numObservations} PRECEDING AND CURRENT ROW) AS sma
               from smatbl;
               """.format(numObservations=numObs - 1)
     )
@@ -70,7 +33,7 @@ def ema_df(
 
     def inner_ema_df(pdf):
         nonlocal mperiods, ema_adjust, espan, data_column, ealpha
-        pdf = pdf.sort_values("timestamp")
+        pdf = pdf.sort_values("time_stamp")
         if ealpha == 0:
             ema = (
                 pdf[data_column]
@@ -109,13 +72,16 @@ def macd_df(sparkdf, fastperiod=12, slowperiod=26, signalperiod=9):
 
 
 def bbands_df(sparkdf, spark, smaperiod=20, stdmultiplier=2):
-    window = Window.partitionBy("symbol").orderBy(col("timestamp").asc())
+    window = (
+        Window.partitionBy("symbol")
+        .orderBy(col("time_stamp").asc())
+        .rowsBetween(-(smaperiod - 1), 0)
+    )
     smadf = sma_sql(sparkdf, spark, smaperiod)
     bbdf = smadf.withColumns(
         {
-            "sma+": col("sma") + (func.stddev("sma").over(window) * stdmultiplier),
-            "sma-": col("sma")
-            - (func.stddev("sma").over(window) * (-1 * stdmultiplier)),
+            "sma+": col("sma") + (func.stddev("close").over(window) * stdmultiplier),
+            "sma-": col("sma") - (func.stddev("close").over(window) * stdmultiplier),
         }
     )
     return bbdf
@@ -128,7 +94,7 @@ def avgrolling_df(sparkdf, avgrolling_col, data_column_name, rolling_periods):
     def inner_avgrolling_df(pdf):
         nonlocal avgrolling_col, data_column_name, rolling_periods
 
-        pdf.sort_values("timestamp")
+        pdf = pdf.sort_values("time_stamp")
         avgrolling = pdf[data_column_name].rolling(rolling_periods).mean()
         return pdf.assign(**{avgrolling_col: avgrolling})
 
@@ -146,7 +112,7 @@ def rsi_df(
     period=14,
 ):
 
-    window = Window.partitionBy("symbol").orderBy(col("timestamp").asc())
+    window = Window.partitionBy("symbol").orderBy(col("time_stamp").asc())
     sparksdf = sparkdf.withColumn(
         "closechange", col("close") - func.lag("close").over(window)
     )
@@ -166,8 +132,8 @@ def rsi_df(
 
     rsidf = rollingavgs.withColumns(
         {
-            "rs": (col(pos_roll_col) / col(neg_roll_col)),
-            "rsi": 100 - (100 / (1 + col("rs"))),
+            "rs": func.try_divide(col(pos_roll_col), col(neg_roll_col)),
+            "rsi": 100 - (func.try_divide(lit(100), (lit(1) + col("rs")))),
         }
     )
     return rsidf
@@ -175,7 +141,7 @@ def rsi_df(
 
 def obv_df(sparkdf):
 
-    closelagwindow = Window.partitionBy("symbol").orderBy(col("timestamp").asc())
+    closelagwindow = Window.partitionBy("symbol").orderBy(col("time_stamp").asc())
     sspf = sparkdf.withColumn("yesterdayclose", func.lag("close").over(closelagwindow))
 
     spf = sspf.withColumn(
@@ -194,7 +160,7 @@ def obv_sql(sparkdf, spark):
     sparkdf.createOrReplaceTempView("obvcalc")
     obvdf = spark.sql("""
     WITH getlaggingclose AS (
-        SELECT timestamp, volume,close, symbol, LAG(close) OVER (PARTITION BY symbol ORDER BY timestamp ASC) AS yesterdayclose, 
+        SELECT time_stamp, volume,close, symbol, LAG(close) OVER (PARTITION BY symbol ORDER BY time_stamp ASC) AS yesterdayclose, 
         CASE
             WHEN `close` > yesterdayclose THEN `volume`
             WHEN `close` < yesterdayclose THEN  (`volume` * -1)
@@ -204,7 +170,7 @@ def obv_sql(sparkdf, spark):
           FROM obvcalc
           ),
         obvfinal AS (
-            SELECT timestamp, volume, close, symbol, SUM(ttobv) OVER (PARTITION BY symbol ORDER BY timestamp ASC) AS lazyobv 
+            SELECT time_stamp, volume, close, symbol, SUM(ttobv) OVER (PARTITION BY symbol ORDER BY time_stamp ASC) AS lazyobv 
             FROM getlaggingclose ) 
         SELECT * FROM obvfinal;
     """)
@@ -212,7 +178,7 @@ def obv_sql(sparkdf, spark):
 
 
 def RoC_df(sparkdf):
-    window = Window.orderBy("timestamp").partitionBy("symbol")
+    window = Window.orderBy("time_stamp").partitionBy("symbol")
     rocdf = sparkdf.withColumns(
         {
             "Lagyesterday": func.lag("close").over(window),
@@ -230,7 +196,7 @@ def RoC_df(sparkdf):
 def RoC_sql(sparkdf, spark):
     sparkdf.createOrReplaceTempView("RoCtbl")
     rocdf = spark.sql(
-        "SELECT timestamp, close,  LAG(close) OVER (PARTITION BY symbol ORDER BY timestamp ASC) AS Lagyesterday, \
+        "SELECT time_stamp, close,  LAG(close) OVER (PARTITION BY symbol ORDER BY time_stamp ASC) AS Lagyesterday, \
     (((close - Lagyesterday)/Lagyesterday)*100)  AS RoC  FROM RoCtbl"
     )
     return rocdf
@@ -247,7 +213,7 @@ def RoC_sql(sparkdf, spark):
 # do todays high - todays low, todays low - yesterday close, todays high - yesterdays close --> looking for biggest num
 # (atr of previous period * (number of periods - 1) + biggest sum of the step above ) / number of periods
 def atr_df(sparkdf):
-    window = Window.partitionBy("symbol").orderBy(col("timestamp").asc())
+    window = Window.partitionBy("symbol").orderBy(col("time_stamp").asc())
     trdf = sparkdf.withColumns(
         {
             "Lagclose": func.lag(col("close")).over(window),
@@ -275,12 +241,14 @@ def atr_df(sparkdf):
 # ADL = Money flow volume * (Period - 1) + Money flow volume (Period)
 # CO = 3 day ema of ADL - 10 day ema of ADL
 def ad_df(sparkdf):
-    window = Window.partitionBy("symbol").orderBy(col("timestamp").asc())
+    window = Window.partitionBy("symbol").orderBy(col("time_stamp").asc())
 
     t = sparkdf.withColumns(
         {
-            "mfm": ((col("close") - col("low")) - (col("high") - col("close")))
-            / (col("high") - col("low")),
+            "mfm": func.try_divide(
+                ((col("close") - col("low")) - (col("high") - col("close"))),
+                (col("high") - col("low")),
+            ),
             "mfv": col("mfm") * col("volume"),
         }
     )
@@ -303,7 +271,7 @@ def adx_df(sparkdf, period):
     # dm- = prevlow - low
     # use greater --> smaller = 0
 
-    window = Window.partitionBy("symbol").orderBy(col("timestamp").asc())
+    window = Window.partitionBy("symbol").orderBy(col("time_stamp").asc())
     lagdf = sparkdf.withColumns(
         {
             "laglow": func.lag("low").over(window),
@@ -352,8 +320,10 @@ def adx_df(sparkdf, period):
     dxdf = dismooth.withColumn(
         "dx",
         (
-            (func.abs((col("smoothdm+") - col("smoothdm-"))))
-            / (func.abs((col("smoothdm+") + col("smoothdm-"))))
+            func.try_divide(
+                (func.abs((col("smoothdm+") - col("smoothdm-")))),
+                (func.abs((col("smoothdm+") + col("smoothdm-")))),
+            )
         )
         * 100,
     )
@@ -377,7 +347,7 @@ def adx_df(sparkdf, period):
 
 def sar_df(sparkdf):
 
-    window = Window.partitionBy("symbol").orderBy(col("timestamp").asc())
+    window = Window.partitionBy("symbol").orderBy(col("time_stamp").asc())
     firstsarwindow = window.rowsBetween(-4, 5)
 
     sarschema = (
@@ -416,14 +386,17 @@ def sar_df(sparkdf):
         "td",
         func.when(
             col("rnum") <= 5,
-            func.sign((col("close") - (col("lmin"))) / 5),
+            func.sign((col("close") - ((col("lmin") + col("lmax")) / 2)) / 5),
         ),
     )
     sarvarsdf = sarvarsdf.withColumn(
         "prevtd", func.when(col("rnum") <= 5, func.lag(col("td")).over(window))
     )
     sarvarsdf = sarvarsdf.withColumn(
-        "td", func.when((col("rnum") <= 5) & (col("td") == 0), col("prevtd"))
+        "td",
+        func.when((col("rnum") <= 5) & (col("td") == 0), col("prevtd")).otherwise(
+            col("td")
+        ),
     )
     sarvarsdf = sarvarsdf.withColumns(
         {
@@ -441,7 +414,7 @@ def sar_df(sparkdf):
     # Acceleration Factor increases by 0.02 every SAR passes Extreme Point --> Max Acceleration Factor = 0.20
     # SAR = Previous Periods SAR + Acceleration Factor * (Extreme Point (Local Max/Min) - Previous Periods SAR)
     def inner_sar_df(pdf):
-        pdf = pdf.sort_values("timestamp")
+        pdf = pdf.sort_values("time_stamp")
         pdf = pdf.reset_index(drop=True)
 
         for i in range(5, len(pdf)):
@@ -449,6 +422,7 @@ def sar_df(sparkdf):
             oldep = pdf.at[(i - 1), "ep"]
             oldtd = pdf.at[(i - 1), "td"]
             oldaf = pdf.at[(i - 1), "af"]
+            flipflag = 0
 
             sar = oldsar + oldaf * (oldep - oldsar)
 
@@ -456,27 +430,31 @@ def sar_df(sparkdf):
                 sar = oldep
                 td = oldtd * -1
                 af = 0.02
+                flipflag = 1
 
             elif sar > pdf.at[i, "low"] and oldtd > 0:
                 sar = oldep
                 td = oldtd * -1
                 af = 0.02
+                flipflag = 1
 
             else:
                 td = oldtd
 
             if td > 0 and oldep < pdf.at[i, "high"]:
                 ep = pdf.at[i, "high"]
-                if oldaf < 0.19:
+                if oldaf < 0.19 and flipflag == 0:
                     af = oldaf + 0.02
                 else:
-                    af = oldaf
+                    if flipflag == 0:
+                        af = oldaf
             elif td < 0 and oldep > pdf.at[i, "low"]:
                 ep = pdf.at[i, "low"]
-                if oldaf < 0.19:
+                if oldaf < 0.19 and flipflag == 0:
                     af = oldaf + 0.02
                 else:
-                    af = oldaf
+                    if flipflag == 0:
+                        af = oldaf
             else:
                 ep = oldep
                 af = oldaf
@@ -492,11 +470,7 @@ def sar_df(sparkdf):
 
 def call_indicators(
     spark=None,
-    client=None,
     sparkdf=None,
-    symbols=None,
-    datefrom=None,
-    dateto=datetime.today(),
     sma_period=20,
     ema_period=20,
     emaspan=20,
@@ -511,11 +485,13 @@ def call_indicators(
     if spark is None:
         spark = spark_connect()
 
-    if client is None:
-        client = alpaca_historical_data_connect()
-
     if sparkdf is None:
-        sparkdf = getstockbardata(client, spark, symbols, datefrom, dateto)
+        symbols = get_symbols(spark)
+        sparkdf = (
+            spark.table("stockalgo.market.raw_bars")
+            .where((col("is_valid")) & (col("symbol").isin(symbols)))
+            .orderBy(col("symbol").desc(), col("time_stamp").asc())
+        )
 
     indicatordf = (
         sparkdf.transform(obv_df)
@@ -529,23 +505,56 @@ def call_indicators(
         .transform(lambda d: adx_df(d, adx_period))
         .transform(sar_df)
     )
-    return indicatordf
 
-
-def checkparquet(spark, parquetpath, symbol):
-    check = spark.read.parquet(parquetpath)
-    check.printSchema()
-    check.filter(col("symbol") == symbol).show(25)
-
-
-spark = spark_connect()
-sym = ["SPY"]
-parquetpath = "/mnt/data/output/indicators"
-
-
-dfs = call_indicators(spark=spark, symbols=sym, datefrom=datetime(2025, 8, 1))
-dfs.write.mode("overwrite").partitionBy("symbol").parquet(parquetpath)
-checkparquet(spark, parquetpath, "SPY")
-
-
-dfs.show()
+    indicatordf = indicatordf.drop(
+        "is_valid",
+        "yesterdayclose",
+        "vsum",
+        "macd12",
+        "macd26",
+        "Lagclose",
+        "StartDate",
+        "EndDate",
+        "closechange",
+        "pos_change",
+        "neg_change",
+        "posrolling",
+        "negrolling",
+        "Lagyesterday",
+        "mfm",
+        "mfv",
+        "laglow",
+        "laghigh",
+        "hl",
+        "hyc",
+        "lyc",
+        "largestcoltoday",
+        "lmin",
+        "lmax",
+        "rnum",
+        "prevtd",
+    )
+    indicatordf = indicatordf.withColumn("middle_bollinger_band", col("sma"))
+    indicatordf = indicatordf.withColumnsRenamed(
+        {
+            "final_vsum": "obv",
+            "signalline": "macd_signal",
+            "histogram": "macd_histogram",
+            "RoC": "roc",
+            "sma+": "upper_bollinger_band",
+            "sma-": "lower_bollinger_band",
+            "dm+": "dm_plus",
+            "dm-": "dm_minus",
+            "smoothdm+": "smooth_dm_plus",
+            "smoothdm-": "smooth_dm_minus",
+            "3dayema": "three_day_ema",
+            "10dayema": "ten_day_ema",
+            "co": "chaikin_ad",
+        }
+    )
+    indicatordf.createOrReplaceTempView("new_indicator_data")
+    spark.sql(""" MERGE INTO stockalgo.market.stock_indicator_data AS sia
+    USING new_indicator_data AS nid ON sia.symbol = nid.symbol AND sia.time_stamp = nid.time_stamp
+    WHEN MATCHED THEN UPDATE SET *
+    WHEN NOT MATCHED THEN INSERT *
+              """)
