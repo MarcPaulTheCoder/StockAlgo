@@ -1,0 +1,82 @@
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: stockalgo-indicators
+  namespace: default
+spec:
+  arguments:
+    - "compute_indicators"
+  volumes:
+    - name: nfs-stockalgo
+      nfs:
+        server: 192.168.20.13
+        path: /mnt/fast/workspaces/stockAlgo
+  type: Python
+  mainApplicationFile: local:///mnt/data/src/stockalgo/main.py
+  sparkVersion: "4.0.0"
+  mode: cluster
+  image: marcpaulthecoder/stockalgo:latest
+  imagePullPolicy: Always
+  sparkConf:
+    "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+    "spark.sql.catalog.stockalgo": "org.apache.iceberg.spark.SparkCatalog"
+    "spark.sql.catalog.stockalgo.type": "rest"
+    "spark.sql.catalog.stockalgo.uri": "http://polaris.polaris.svc.cluster.local:8181/api/catalog"
+    "spark.sql.catalog.stockalgo.warehouse": "stockalgo"
+    "spark.sql.catalog.stockalgo.scope": "PRINCIPAL_ROLE:ALL"
+    "spark.sql.catalog.stockalgo.io-impl": "org.apache.iceberg.aws.s3.S3FileIO"
+    "spark.sql.catalog.stockalgo.s3.endpoint": "http://minio.minio.svc.cluster.local:9000"
+    "spark.sql.catalog.stockalgo.s3.path-style-access": "true"
+    "spark.sql.defaultCatalog": "stockalgo"
+    "spark.sql.catalog.stockalgo.rest-metrics-reporting-enabled": "false"
+  driver:
+    volumeMounts:
+      - name: nfs-stockalgo
+        mountPath: /mnt/data
+    env:
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: minio-access-key
+            key: KEY
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: minio-secret-key
+            key: KEY
+      - name: ALPACA_KEY
+        valueFrom:
+          secretKeyRef:
+            name: alpaca-paper-secret
+            key: KEY
+      - name: ALPACA_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: alpaca-paper-secret
+            key: SECRET
+      - name: POLARIS_CREDS
+        valueFrom:
+          secretKeyRef:
+            name: polaris-creds
+            key: KEY
+    cores: 2
+    memory: "6g"
+    serviceAccount: spark-release-spark-operator-spark
+  executor:
+    volumeMounts:
+      - name: nfs-stockalgo
+        mountPath: /mnt/data
+    env:
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: minio-access-key
+            key: KEY
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: minio-secret-key
+            key: KEY
+    cores: 4
+    memory: "8g"
+    instances: 4
