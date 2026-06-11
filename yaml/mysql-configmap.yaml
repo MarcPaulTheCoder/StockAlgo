@@ -10,6 +10,7 @@ data:
     bind-address=0.0.0.0
     log-bin
     server-id=1
+    innodb_buffer_pool_size=4G
     gtid_mode=ON
     enforce-gtid-consistency=ON
 
@@ -18,6 +19,7 @@ data:
     bind-address=0.0.0.0
     super-read-only
     server-id=2
+    innodb_buffer_pool_size=4G
     gtid_mode=ON
     event_scheduler=OFF
     enforce-gtid-consistency=ON

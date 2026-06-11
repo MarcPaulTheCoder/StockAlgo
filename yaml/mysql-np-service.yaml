@@ -6,7 +6,7 @@ spec:
   type: NodePort
   selector:
     app: mysql
-    role: primary
+    statefulset.kubernetes.io/pod-name: mysql-0
   ports:
     - port: 8999
       targetPort: 3306
@@ -20,7 +20,7 @@ spec:
   externalTrafficPolicy: Cluster
   selector:
     app: mysql
-    role: secondary
+    statefulset.kubernetes.io/pod-name: mysql-1
   ports:
     - port: 31222
       targetPort: 3306

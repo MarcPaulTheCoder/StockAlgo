@@ -25,4 +25,4 @@ spec:
       port: 3306
   selector:
     app: mysql
-    role: secondary
+    statefulset.kubernetes.io/pod-name: mysql-1

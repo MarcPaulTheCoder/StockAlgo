@@ -47,7 +47,9 @@ spec:
               containerPort: 3306
           resources:
             requests:
-              memory: 64Gi
+              memory: 8Gi
+            limits:
+              memory: 16Gi
           volumeMounts:
             - name: fast-nfs-pvc
               mountPath: /var/lib/mysql
