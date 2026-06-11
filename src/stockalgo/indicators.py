@@ -3,6 +3,7 @@ from pyspark.sql.types import DoubleType
 from pyspark.sql.functions import col, lit
 from stockalgo.connections import spark_connect
 from stockalgo.ingest import get_symbols
+from stockalgo.indicator_math import ema_math, avg_rolling_math, sar_math
 
 
 def sma_sql(sparkdf, spark, numObs=5):
@@ -24,51 +25,44 @@ def sma_sql(sparkdf, spark, numObs=5):
 
 
 def ema_df(
-    sparkdf, mperiods, espan=0, data_column="close", emacolname="ema", ealpha=0.0
+    spark_df, m_periods, e_span=0, data_column="close", ema_col_name="ema", e_alpha=0.0
 ):
-
-    ema_schema = sparkdf.schema.add(emacolname, DoubleType())
-    emadff = sparkdf.withColumn(emacolname, func.lit(0.0))
+    ema_schema = spark_df.schema.add(ema_col_name, DoubleType())
+    ema_df = spark_df.withColumn(ema_col_name, func.lit(0.0))
     ema_adjust = True
-
-    def inner_ema_df(pdf):
-        nonlocal mperiods, ema_adjust, espan, data_column, ealpha
-        pdf = pdf.sort_values("time_stamp")
-        if ealpha == 0:
-            ema = (
-                pdf[data_column]
-                .ewm(span=espan, min_periods=mperiods, adjust=ema_adjust)
-                .mean()
-            )
-        else:
-            ema = (
-                pdf[data_column]
-                .ewm(alpha=ealpha, min_periods=mperiods, adjust=ema_adjust)
-                .mean()
-            )
-        return pdf.assign(**{emacolname: ema})
-
-    return emadff.groupBy("symbol").applyInPandas(inner_ema_df, schema=ema_schema)
+    ema_df_output = ema_df.groupBy("symbol").applyInPandas(
+        lambda pdf: ema_math(
+            pdf, m_periods, ema_adjust, e_span, ema_col_name, data_column, e_alpha
+        ),
+        schema=ema_schema,
+    )
+    return ema_df_output
 
 
-def macd_df(sparkdf, fastperiod=12, slowperiod=26, signalperiod=9):
+def macd_df(spark_df, fast_period=12, slow_period=26, signal_period=9):
 
     macdfast = ema_df(
-        sparkdf, fastperiod, fastperiod, "close", emacolname=f"macd{fastperiod}"
+        spark_df, fast_period, fast_period, "close", ema_col_name=f"macd{fast_period}"
     )
     macdslow = ema_df(
-        macdfast, slowperiod, slowperiod, "close", emacolname=f"macd{slowperiod}"
+        macdfast, slow_period, slow_period, "close", ema_col_name=f"macd{slow_period}"
     )
 
     macdline = macdslow.withColumn(
-        "macd_line", col(f"macd{fastperiod}") - col(f"macd{slowperiod}")
+        "macd_line", col(f"macd{fast_period}") - col(f"macd{slow_period}")
     )
 
     signalline = ema_df(
-        macdline, signalperiod, signalperiod, "macd_line", emacolname="signalline"
+        macdline,
+        signal_period,
+        signal_period,
+        "macd_line",
+        ema_col_name="signalline",
     )
-    fmacd = signalline.withColumn("histogram", col("macd_line") - col("signalline"))
-    return fmacd
+    macd_df_output = signalline.withColumn(
+        "histogram", col("macd_line") - col("signalline")
+    )
+    return macd_df_output
 
 
 def bbands_df(sparkdf, spark, smaperiod=20, stdmultiplier=2):
@@ -87,20 +81,17 @@ def bbands_df(sparkdf, spark, smaperiod=20, stdmultiplier=2):
     return bbdf
 
 
-def avgrolling_df(sparkdf, avgrolling_col, data_column_name, rolling_periods):
-    rolling_schema = sparkdf.schema.add(avgrolling_col, DoubleType())
-    rolling_df = sparkdf.withColumn(avgrolling_col, func.lit(0.0))
+def avgrolling_df(spark_df, avg_rolling_col, data_column_name, rolling_periods):
+    rolling_schema = spark_df.schema.add(avg_rolling_col, DoubleType())
+    rolling_df = spark_df.withColumn(avg_rolling_col, func.lit(0.0))
 
-    def inner_avgrolling_df(pdf):
-        nonlocal avgrolling_col, data_column_name, rolling_periods
-
-        pdf = pdf.sort_values("time_stamp")
-        avgrolling = pdf[data_column_name].rolling(rolling_periods).mean()
-        return pdf.assign(**{avgrolling_col: avgrolling})
-
-    return rolling_df.groupBy("symbol").applyInPandas(
-        inner_avgrolling_df, rolling_schema
+    rolling_df_output = rolling_df.groupBy("symbol").applyInPandas(
+        lambda pdf: avg_rolling_math(
+            pdf, avg_rolling_col, data_column_name, rolling_periods
+        ),
+        schema=rolling_schema,
     )
+    return rolling_df_output
 
 
 def rsi_df(
@@ -222,7 +213,7 @@ def atr_df(sparkdf):
             "lyc": col("low") - col("Lagclose"),
         }
     )
-    ttt = trdf.withColumn(
+    tr_df = trdf.withColumn(
         "largestcoltoday",
         func.greatest(
             func.abs(col("hl")),
@@ -231,7 +222,12 @@ def atr_df(sparkdf):
         ),
     )
 
-    atr = avgrolling_df(ttt, "atr", "largestcoltoday", 14)
+    atr = avgrolling_df(
+        spark_df=tr_df,
+        avg_rolling_col="atr",
+        data_column_name="largestcoltoday",
+        rolling_periods=14,
+    )
     return atr
 
 
@@ -253,15 +249,15 @@ def ad_df(sparkdf):
         }
     )
 
-    tt = t.withColumn("adl", func.sum(col("mfv")).over(window))
+    ad_df = t.withColumn("adl", func.sum(col("mfv")).over(window))
 
-    treedayemadf = ema_df(tt, 3, 3, "adl", "3dayema")
+    ad_ema_df = ema_df(ad_df, 3, 3, "adl", "3dayema")
 
-    addfs = ema_df(treedayemadf, 10, 10, "adl", "10dayema")
+    ad_dfs = ema_df(ad_ema_df, 10, 10, "adl", "10dayema")
 
-    addf = addfs.withColumn("co", col("3dayema") - col("10dayema"))
+    ad_df_output = ad_dfs.withColumn("co", col("3dayema") - col("10dayema"))
 
-    return addf
+    return ad_df_output
 
 
 # ADX
@@ -272,7 +268,7 @@ def adx_df(sparkdf, period):
     # use greater --> smaller = 0
 
     window = Window.partitionBy("symbol").orderBy(col("time_stamp").asc())
-    lagdf = sparkdf.withColumns(
+    lag_df = sparkdf.withColumns(
         {
             "laglow": func.lag("low").over(window),
             "laghigh": func.lag("high").over(window),
@@ -280,7 +276,7 @@ def adx_df(sparkdf, period):
         }
     )
 
-    dmdf = lagdf.withColumns(
+    dm_df = lag_df.withColumns(
         {
             "dm+": func.when(
                 (col("high") - col("laghigh") > col("laglow") - col("low"))
@@ -300,24 +296,28 @@ def adx_df(sparkdf, period):
     # high - prevclose
     # low - prevclose
 
-    atrdf = atr_df(dmdf)
+    atr_df_output = atr_df(dm_df)
 
     # 3. Smoothed Directional Movement Indicators
     # Represents % strength of movement
     # +DI = ((Smoothed +DM(Period)) / ATR(Period)) * 100
     # -DI = ((Smoothed -DM(Period)) / ATR(Period)) * 100
 
-    diplus = ema_df(
-        atrdf, period, data_column="dm+", emacolname="smoothdm+", ealpha=1 / 14
+    di_plus_df = ema_df(
+        atr_df_output,
+        period,
+        data_column="dm+",
+        ema_col_name="smoothdm+",
+        e_alpha=1 / 14,
     )
-    dismooth = ema_df(
-        diplus, period, data_column="dm-", emacolname="smoothdm-", ealpha=1 / 14
+    di_smooth = ema_df(
+        di_plus_df, period, data_column="dm-", ema_col_name="smoothdm-", e_alpha=1 / 14
     )
 
     # 4. DX
     # DX = (abs(+DI(Period) - -DI(Period)) )  /  (abs(+DI(Period) + -DI(Period)))
 
-    dxdf = dismooth.withColumn(
+    dx_df = di_smooth.withColumn(
         "dx",
         (
             func.try_divide(
@@ -331,8 +331,10 @@ def adx_df(sparkdf, period):
     # 5. ADX
     # first ADX = average of first Period DX values
     # ADX = ((PrevADX * (Period - 1)) + DX) / Period
-    adxdf = ema_df(dxdf, period, period, "dx", emacolname="adx", ealpha=1 / 14)
-    return adxdf
+    adx_df_output = ema_df(
+        dx_df, period, period, "dx", ema_col_name="adx", e_alpha=1 / 14
+    )
+    return adx_df_output
 
 
 # Parabolic SAR
@@ -350,7 +352,7 @@ def sar_df(sparkdf):
     window = Window.partitionBy("symbol").orderBy(col("time_stamp").asc())
     firstsarwindow = window.rowsBetween(-4, 5)
 
-    sarschema = (
+    sar_schema = (
         sparkdf.schema.add("af", DoubleType())
         .add("lmin", DoubleType())
         .add("lmax", DoubleType())
@@ -409,63 +411,10 @@ def sar_df(sparkdf):
         }
     )
 
-    # While Up trend --> If SAR > low (Extreme Point) --> Trendreversal (Trend flips to Down Trend) --> Old Extreme Point becomes Current SAR --> Extreme Point = low
-    # While Down trend --> If SAR < high (Extreme Point) --> Trendreversal (Trend flips to Up Trend) --> Old Extreme Point becomes Current SAR --> Extreme Point = high
-    # Acceleration Factor increases by 0.02 every SAR passes Extreme Point --> Max Acceleration Factor = 0.20
-    # SAR = Previous Periods SAR + Acceleration Factor * (Extreme Point (Local Max/Min) - Previous Periods SAR)
-    def inner_sar_df(pdf):
-        pdf = pdf.sort_values("time_stamp")
-        pdf = pdf.reset_index(drop=True)
-
-        for i in range(5, len(pdf)):
-            oldsar = pdf.at[(i - 1), "sar"]
-            oldep = pdf.at[(i - 1), "ep"]
-            oldtd = pdf.at[(i - 1), "td"]
-            oldaf = pdf.at[(i - 1), "af"]
-            flipflag = 0
-
-            sar = oldsar + oldaf * (oldep - oldsar)
-
-            if sar < pdf.at[i, "high"] and oldtd < 0:
-                sar = oldep
-                td = oldtd * -1
-                af = 0.02
-                flipflag = 1
-
-            elif sar > pdf.at[i, "low"] and oldtd > 0:
-                sar = oldep
-                td = oldtd * -1
-                af = 0.02
-                flipflag = 1
-
-            else:
-                td = oldtd
-
-            if td > 0 and oldep < pdf.at[i, "high"]:
-                ep = pdf.at[i, "high"]
-                if oldaf < 0.19 and flipflag == 0:
-                    af = oldaf + 0.02
-                else:
-                    if flipflag == 0:
-                        af = oldaf
-            elif td < 0 and oldep > pdf.at[i, "low"]:
-                ep = pdf.at[i, "low"]
-                if oldaf < 0.19 and flipflag == 0:
-                    af = oldaf + 0.02
-                else:
-                    if flipflag == 0:
-                        af = oldaf
-            else:
-                ep = oldep
-                af = oldaf
-
-            pdf.at[i, "sar"] = sar
-            pdf.at[i, "ep"] = ep
-            pdf.at[i, "td"] = td
-            pdf.at[i, "af"] = af
-        return pdf
-
-    return sarvarsdf.groupBy("symbol").applyInPandas(inner_sar_df, schema=sarschema)
+    sar_df_output = sarvarsdf.groupBy("symbol").applyInPandas(
+        sar_math, schema=sar_schema
+    )
+    return sar_df_output
 
 
 def call_indicators(

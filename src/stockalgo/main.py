@@ -19,7 +19,7 @@ def main():
     parser.add_argument("start_year", type=int, nargs="?", default=2026)
     parser.add_argument("start_month", type=int, nargs="?", default=1)
     parser.add_argument("start_day", type=int, nargs="?", default=1)
-    parser.add_argument("chunk_size", type=int, nargs="?", default=200)
+    parser.add_argument("chunk_size", type=int, nargs="?", default=2000)
     args = parser.parse_args()
 
     if args.action == "ingest":
