@@ -98,12 +98,18 @@ The most substantial engineering in the build:
 
 ## Infrastructure
 
-The cluster runs on two physical machines rather than cloud instances:
+The cluster runs on owned hardware rather than cloud instances:
 
 - **backend-5090** — Ryzen 9 9950X, 256 GB RAM, RTX 5090. Control plane and worker.
 - **frontend-7900xtx** — Ryzen 9 7900X, 128 GB RAM, RX 7900 XTX. Worker.
+- **TrueNAS NAS** — the persistence tier. Every stateful component — MinIO's object
+  store, the MySQL StatefulSet, Polaris's catalog database, and Airflow's metadata,
+  DAGs, and logs — lives on NFS persistent volumes served from mirrored NVMe, with a
+  mirrored-HDD backup tier behind it.
 
-They are connected over 25 GbE at MTU 9000 on a dedicated VLAN, with Calico providing the pod network and NFS providing shared storage.
+The compute nodes are stateless: no persistent state lives on either node, so any pod
+can be rescheduled without data loss. Nodes reach the NAS over 25 GbE at MTU 9000 on
+a dedicated VLAN; Calico provides the pod network.
 
 ## Repository layout
 
@@ -112,13 +118,17 @@ They are connected over 25 GbE at MTU 9000 on a dedicated VLAN, with Calico prov
 │   ├── main.py             #   entrypoint: selects ingest or compute_indicators
 │   ├── connections.py      #   Spark session + Alpaca client
 │   ├── ingest.py           #   fetch, validate, MERGE -> raw_bars
+│   ├── validate_bars.py    #   neighbor validation -> is_valid flag
 │   ├── indicators.py       #   the 11 indicators, MERGE -> stock_indicator_data
+│   ├── indicator_math.py   #   pure pandas math for the recursive indicators (unit-tested)
 │   └── apply_ddl.py        #   Iceberg table bootstrap
 ├── dags/                   # Airflow DAG (ingest >> indicators)
 ├── ddl/                    # table DDL
 ├── docker/                 # Dockerfile + requirements
 ├── yaml/                   # K8s manifests: SparkApplications, MinIO, Polaris, RBAC, NFS
-├── tests/                  # Iceberg smoke test
+├── tests/                  # pytest
+│   ├── unit/               #   pure pandas — indicator math
+│   └── spark/              #   local-session Spark — bar validation
 ├── legacy/                 # StockAlgo v1 (MySQL / RDS) — see Lineage
 └── pyproject.toml
 ```
