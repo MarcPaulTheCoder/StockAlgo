@@ -21,3 +21,5 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["integration: hits real Polaris/MinIO"]
+addopts = "-m 'not integration'"

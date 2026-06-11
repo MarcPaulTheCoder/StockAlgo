@@ -3,6 +3,7 @@ import logging
 from stockalgo.connections import spark_connect, alpaca_historical_data_connect
 from stockalgo.ingest import clean_and_insert_rawbars
 from stockalgo.indicators import call_indicators
+from stockalgo.apply_ddl import apply_ddl
 
 
 def main():
@@ -14,7 +15,7 @@ def main():
 
     parser.add_argument(
         "action",
-        choices=["ingest", "compute_indicators"],
+        choices=["ingest", "compute_indicators", "apply_ddl"],
     )
     parser.add_argument("start_year", type=int, nargs="?", default=2026)
     parser.add_argument("start_month", type=int, nargs="?", default=1)
@@ -34,6 +35,9 @@ def main():
         )
     if args.action == "compute_indicators":
         call_indicators(spark=spark)
+
+    if args.action == "apply_ddl":
+        apply_ddl(spark, "/mnt/data/ddl/stockTableCreation.sql")
 
 
 if __name__ == "__main__":

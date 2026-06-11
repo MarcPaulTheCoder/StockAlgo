@@ -1,11 +1,11 @@
 apiVersion: sparkoperator.k8s.io/v1beta2
 kind: SparkApplication
 metadata:
-  name: pyspark-pi
+  name: stockalgo-ingest
   namespace: default
 spec:
   arguments:
-    - "ingest"
+    - "apply_ddl"
   volumes:
     - name: nfs-stockalgo
       nfs:
@@ -28,6 +28,7 @@ spec:
     "spark.sql.catalog.stockalgo.s3.endpoint": "http://minio.minio.svc.cluster.local:9000"
     "spark.sql.catalog.stockalgo.s3.path-style-access": "true"
     "spark.sql.defaultCatalog": "stockalgo"
+    "spark.sql.catalog.stockalgo.rest-metrics-reporting-enabled": "false"
   driver:
     volumeMounts:
       - name: nfs-stockalgo

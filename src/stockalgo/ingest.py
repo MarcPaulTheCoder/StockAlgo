@@ -41,6 +41,15 @@ def getstockbardata(client, spark, symbols, datefrom=None, dateto=None):
         return sparkdf
 
 
+def merge_raw_bars(spark, spark_df):
+    spark_df.createOrReplaceTempView("new_raw_bars")
+    spark.sql(""" MERGE INTO stockalgo.market.raw_bars AS rb 
+              USING new_raw_bars AS nrb ON rb.symbol = nrb.symbol AND rb.time_stamp = nrb.time_stamp
+              WHEN MATCHED THEN UPDATE SET *
+              WHEN NOT MATCHED THEN INSERT *
+              """)
+
+
 def clean_and_insert_rawbars(
     sym_client, spark, chunk_size=200, dt_year=2026, dt_month=1, dt_day=1
 ):
@@ -73,11 +82,7 @@ def clean_and_insert_rawbars(
 
     sparkdf = validate_bars(sparkdf)
 
-    sparkdf.createOrReplaceTempView("new_raw_bars")
-    spark.sql(""" MERGE INTO stockalgo.market.raw_bars AS rb 
-              USING new_raw_bars AS nrb ON rb.symbol = nrb.symbol AND rb.time_stamp = nrb.time_stamp
-              WHEN MATCHED THEN UPDATE SET *
-              WHEN NOT MATCHED THEN INSERT *
-              """)
+    merge_raw_bars(spark, spark_df=sparkdf)
+
     if failed:
         logger.warning("%d chunks failed: %s", len(failed), failed)
