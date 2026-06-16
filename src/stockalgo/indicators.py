@@ -1,340 +1,104 @@
-from pyspark.sql import Window, functions as func
-from pyspark.sql.types import DoubleType
-from pyspark.sql.functions import col, lit
+from pyspark.sql import Window, WindowSpec, functions as F, DataFrame, SparkSession
+from pyspark.sql.types import DoubleType, StructType
 from stockalgo.connections import spark_connect
-from stockalgo.ingest import get_symbols
-from stockalgo.indicator_math import ema_math, avg_rolling_math, sar_math
+from stockalgo.indicator_math import (
+    do_applyInPandas,
+)
 
 
-def sma_sql(sparkdf, spark, numObs=5):
-    sparkdf = sparkdf.drop(
-        col("StartDate"), col("EndDate"), col("sma"), col("LagClose")
+def _by_symbol() -> WindowSpec:
+    return Window.partitionBy("symbol").orderBy("time_stamp")
+
+
+def build_output_schema(input_df: DataFrame) -> StructType:
+    """returns the applyInPandas output schema: input schema plus the 18 indicator columns, in append order."""
+
+    output_schema = (
+        StructType(list(input_df.schema))
+        .add("ema", DoubleType())
+        .add("macd_12", DoubleType())
+        .add("macd_26", DoubleType())
+        .add("three_day_ema", DoubleType())
+        .add("ten_day_ema", DoubleType())
+        .add("smooth_dm_plus", DoubleType())
+        .add("smooth_dm_minus", DoubleType())
+        .add("posrolling", DoubleType())
+        .add("negrolling", DoubleType())
+        .add("atr", DoubleType())
+        .add("macd_line", DoubleType())
+        .add("signal_line", DoubleType())
+        .add("dx", DoubleType())
+        .add("adx", DoubleType())
+        .add("histogram", DoubleType())
+        .add("chaikin_ad", DoubleType())
+        .add("rs", DoubleType())
+        .add("rsi", DoubleType())
     )
-    sparkdf.createOrReplaceTempView("smatbl")
-    smadf = spark.sql(
-        """
-              SELECT *,
-              LAG(close) OVER (PARTITION BY symbol ORDER BY time_stamp ASC) AS  LagClose,
-              MIN(`time_stamp`)  OVER ( PARTITION BY `symbol` ORDER BY `time_stamp` ASC ROWS BETWEEN {numObservations}  PRECEDING AND CURRENT ROW) AS StartDate,
-              MAX(`time_stamp`)  OVER ( PARTITION BY `symbol` ORDER BY `time_stamp` ASC ROWS BETWEEN {numObservations}  PRECEDING AND CURRENT ROW) AS EndDate,
-              AVG(`close`) OVER ( PARTITION BY `symbol` ORDER BY `time_stamp` ASC ROWS BETWEEN {numObservations} PRECEDING AND CURRENT ROW) AS sma
-              from smatbl;
-              """.format(numObservations=numObs - 1)
-    )
-    return smadf
+    return output_schema
 
 
-def ema_df(
-    spark_df, m_periods, e_span=0, data_column="close", ema_col_name="ema", e_alpha=0.0
-):
-    ema_schema = spark_df.schema.add(ema_col_name, DoubleType())
-    ema_df = spark_df.withColumn(ema_col_name, func.lit(0.0))
-    ema_adjust = True
-    ema_df_output = ema_df.groupBy("symbol").applyInPandas(
-        lambda pdf: ema_math(
-            pdf, m_periods, ema_adjust, e_span, ema_col_name, data_column, e_alpha
-        ),
-        schema=ema_schema,
-    )
-    return ema_df_output
+def sma_df(spark_df: DataFrame, num_obs: int = 5) -> DataFrame:
+    """the num_obs-period simple moving average of close per symbol."""
+
+    window = _by_symbol().rowsBetween(-(num_obs - 1), 0)
+    sma = spark_df.withColumn("sma", F.avg(F.col("close")).over(window))
+    return sma
 
 
-def macd_df(spark_df, fast_period=12, slow_period=26, signal_period=9):
+def bbands_df(
+    spark_df: DataFrame,
+    sma_period: int = 20,
+    std_multiplier: float = 2,
+) -> DataFrame:
+    """sma_plus/sma_minus = sma ± std_multiplier × rolling stddev of close over sma_period."""
 
-    macdfast = ema_df(
-        spark_df, fast_period, fast_period, "close", ema_col_name=f"macd{fast_period}"
-    )
-    macdslow = ema_df(
-        macdfast, slow_period, slow_period, "close", ema_col_name=f"macd{slow_period}"
-    )
-
-    macdline = macdslow.withColumn(
-        "macd_line", col(f"macd{fast_period}") - col(f"macd{slow_period}")
-    )
-
-    signalline = ema_df(
-        macdline,
-        signal_period,
-        signal_period,
-        "macd_line",
-        ema_col_name="signalline",
-    )
-    macd_df_output = signalline.withColumn(
-        "histogram", col("macd_line") - col("signalline")
-    )
-    return macd_df_output
-
-
-def bbands_df(sparkdf, spark, smaperiod=20, stdmultiplier=2):
-    window = (
-        Window.partitionBy("symbol")
-        .orderBy(col("time_stamp").asc())
-        .rowsBetween(-(smaperiod - 1), 0)
-    )
-    smadf = sma_sql(sparkdf, spark, smaperiod)
-    bbdf = smadf.withColumns(
+    window = _by_symbol().rowsBetween(-(sma_period - 1), 0)
+    sma = sma_df(spark_df=spark_df, num_obs=sma_period)
+    bb_df = sma.withColumns(
         {
-            "sma+": col("sma") + (func.stddev("close").over(window) * stdmultiplier),
-            "sma-": col("sma") - (func.stddev("close").over(window) * stdmultiplier),
+            "sma_plus": F.col("sma")
+            + (F.stddev_pop("close").over(window) * std_multiplier),
+            "sma_minus": F.col("sma")
+            - (F.stddev_pop("close").over(window) * std_multiplier),
         }
     )
-    return bbdf
+    return bb_df
 
 
-def avgrolling_df(spark_df, avg_rolling_col, data_column_name, rolling_periods):
-    rolling_schema = spark_df.schema.add(avg_rolling_col, DoubleType())
-    rolling_df = spark_df.withColumn(avg_rolling_col, func.lit(0.0))
+def obv_df(sparkdf: DataFrame) -> DataFrame:
+    """running sum of volume signed by close vs prior close, per symbol."""
 
-    rolling_df_output = rolling_df.groupBy("symbol").applyInPandas(
-        lambda pdf: avg_rolling_math(
-            pdf, avg_rolling_col, data_column_name, rolling_periods
-        ),
-        schema=rolling_schema,
+    closelagwindow = _by_symbol()
+    prior_close = sparkdf.withColumn("prior_close", F.lag("close").over(closelagwindow))
+
+    signed_vol_df = prior_close.withColumn(
+        "signed_volume",
+        F.when(
+            (F.col("close") >= F.col("prior_close")) | (F.col("prior_close").isNull()),
+            F.col("volume"),
+        ).otherwise(F.col("volume") * -1),
     )
-    return rolling_df_output
 
-
-def rsi_df(
-    sparkdf,
-    pos_roll_col="posrolling",
-    pos_data_col="pos_change",
-    neg_roll_col="negrolling",
-    neg_data_col="neg_change",
-    period=14,
-):
-
-    window = Window.partitionBy("symbol").orderBy(col("time_stamp").asc())
-    sparksdf = sparkdf.withColumn(
-        "closechange", col("close") - func.lag("close").over(window)
+    obv = signed_vol_df.withColumn(
+        "obv", F.sum(F.col("signed_volume")).over(closelagwindow)
     )
-    sparknp = sparksdf.withColumns(
+    return obv
+
+
+def roc_df(spark_df: DataFrame) -> DataFrame:
+    """1-period percent rate of change of close, per symbol."""
+
+    window = _by_symbol()
+    roc = spark_df.withColumns(
         {
-            pos_data_col: func.when(
-                col("closechange") > 0, col("closechange")
-            ).otherwise(0),
-            neg_data_col: func.abs(
-                func.when(col("closechange") < 0, col("closechange")).otherwise(0)
-            ),
-        }
-    )
-
-    roll_df = avgrolling_df(sparknp, pos_roll_col, pos_data_col, period)
-    rollingavgs = avgrolling_df(roll_df, neg_roll_col, neg_data_col, period)
-
-    rsidf = rollingavgs.withColumns(
-        {
-            "rs": func.try_divide(col(pos_roll_col), col(neg_roll_col)),
-            "rsi": 100 - (func.try_divide(lit(100), (lit(1) + col("rs")))),
-        }
-    )
-    return rsidf
-
-
-def obv_df(sparkdf):
-
-    closelagwindow = Window.partitionBy("symbol").orderBy(col("time_stamp").asc())
-    sspf = sparkdf.withColumn("yesterdayclose", func.lag("close").over(closelagwindow))
-
-    spf = sspf.withColumn(
-        "vsum",
-        func.when(
-            (col("close") >= col("yesterdayclose")) | (col("yesterdayclose").isNull()),
-            col("volume"),
-        ).otherwise(col("volume") * -1),
-    )
-
-    obvdf = spf.withColumn("final_vsum", func.sum(col("vsum")).over(closelagwindow))
-    return obvdf
-
-
-def obv_sql(sparkdf, spark):
-    sparkdf.createOrReplaceTempView("obvcalc")
-    obvdf = spark.sql("""
-    WITH getlaggingclose AS (
-        SELECT time_stamp, volume,close, symbol, LAG(close) OVER (PARTITION BY symbol ORDER BY time_stamp ASC) AS yesterdayclose, 
-        CASE
-            WHEN `close` > yesterdayclose THEN `volume`
-            WHEN `close` < yesterdayclose THEN  (`volume` * -1)
-            WHEN close = yesterdayclose THEN volume
-            ELSE volume
-            END AS ttobv 
-          FROM obvcalc
-          ),
-        obvfinal AS (
-            SELECT time_stamp, volume, close, symbol, SUM(ttobv) OVER (PARTITION BY symbol ORDER BY time_stamp ASC) AS lazyobv 
-            FROM getlaggingclose ) 
-        SELECT * FROM obvfinal;
-    """)
-    return obvdf
-
-
-def RoC_df(sparkdf):
-    window = Window.orderBy("time_stamp").partitionBy("symbol")
-    rocdf = sparkdf.withColumns(
-        {
-            "Lagyesterday": func.lag("close").over(window),
-            "RoC": (
-                func.try_divide(
-                    func.try_subtract("close", "Lagyesterday"), "Lagyesterday"
-                )
+            "prior_close": F.lag("close").over(window),
+            "roc": (
+                F.try_divide(F.try_subtract("close", "prior_close"), "prior_close")
                 * 100
             ),
         }
     )
-    return rocdf
-
-
-def RoC_sql(sparkdf, spark):
-    sparkdf.createOrReplaceTempView("RoCtbl")
-    rocdf = spark.sql(
-        "SELECT time_stamp, close,  LAG(close) OVER (PARTITION BY symbol ORDER BY time_stamp ASC) AS Lagyesterday, \
-    (((close - Lagyesterday)/Lagyesterday)*100)  AS RoC  FROM RoCtbl"
-    )
-    return rocdf
-
-
-# ATR
-# first need true value --> todays high, todays low, yesterdays close
-# do all three for every day if you don't have previous ATR --> todays high - todays low, todays high - yesterdays close, and todays low - ysterdays close
-# take the largest number of the three calculations above
-# find the highest sum at the column level of the three calculations
-# multiple that sum by 1/number of periods --> highest sum * (1/number of periods) --> gives you average volatility --> atr of previous period
-
-
-# do todays high - todays low, todays low - yesterday close, todays high - yesterdays close --> looking for biggest num
-# (atr of previous period * (number of periods - 1) + biggest sum of the step above ) / number of periods
-def atr_df(sparkdf):
-    window = Window.partitionBy("symbol").orderBy(col("time_stamp").asc())
-    trdf = sparkdf.withColumns(
-        {
-            "Lagclose": func.lag(col("close")).over(window),
-            "hl": col("high") - col("low"),
-            "hyc": col("high") - col("Lagclose"),
-            "lyc": col("low") - col("Lagclose"),
-        }
-    )
-    tr_df = trdf.withColumn(
-        "largestcoltoday",
-        func.greatest(
-            func.abs(col("hl")),
-            func.abs(col("hyc")),
-            func.abs(col("lyc")),
-        ),
-    )
-
-    atr = avgrolling_df(
-        spark_df=tr_df,
-        avg_rolling_col="atr",
-        data_column_name="largestcoltoday",
-        rolling_periods=14,
-    )
-    return atr
-
-
-# chaikin AD
-# money flow multiplier = (  (close - low) - (high - close) ) / (high - Low)
-# Money flow volume = Money flow multiplier * (volume * period)
-# ADL = Money flow volume * (Period - 1) + Money flow volume (Period)
-# CO = 3 day ema of ADL - 10 day ema of ADL
-def ad_df(sparkdf):
-    window = Window.partitionBy("symbol").orderBy(col("time_stamp").asc())
-
-    t = sparkdf.withColumns(
-        {
-            "mfm": func.try_divide(
-                ((col("close") - col("low")) - (col("high") - col("close"))),
-                (col("high") - col("low")),
-            ),
-            "mfv": col("mfm") * col("volume"),
-        }
-    )
-
-    ad_df = t.withColumn("adl", func.sum(col("mfv")).over(window))
-
-    ad_ema_df = ema_df(ad_df, 3, 3, "adl", "3dayema")
-
-    ad_dfs = ema_df(ad_ema_df, 10, 10, "adl", "10dayema")
-
-    ad_df_output = ad_dfs.withColumn("co", col("3dayema") - col("10dayema"))
-
-    return ad_df_output
-
-
-# ADX
-def adx_df(sparkdf, period):
-    # 1. DM
-    # dm+ = high - prevhigh
-    # dm- = prevlow - low
-    # use greater --> smaller = 0
-
-    window = Window.partitionBy("symbol").orderBy(col("time_stamp").asc())
-    lag_df = sparkdf.withColumns(
-        {
-            "laglow": func.lag("low").over(window),
-            "laghigh": func.lag("high").over(window),
-            "lagclose": func.lag("close").over(window),
-        }
-    )
-
-    dm_df = lag_df.withColumns(
-        {
-            "dm+": func.when(
-                (col("high") - col("laghigh") > col("laglow") - col("low"))
-                & (col("high") - col("laghigh") > 0),
-                col("high") - col("laghigh"),
-            ).otherwise(0),
-            "dm-": func.when(
-                (col("laglow") - col("low") > col("high") - col("laghigh"))
-                & (col("laglow") - col("low") > 0),
-                col("laglow") - col("low"),
-            ).otherwise(0),
-        }
-    )
-
-    # 2. TR
-    # high - low
-    # high - prevclose
-    # low - prevclose
-
-    atr_df_output = atr_df(dm_df)
-
-    # 3. Smoothed Directional Movement Indicators
-    # Represents % strength of movement
-    # +DI = ((Smoothed +DM(Period)) / ATR(Period)) * 100
-    # -DI = ((Smoothed -DM(Period)) / ATR(Period)) * 100
-
-    di_plus_df = ema_df(
-        atr_df_output,
-        period,
-        data_column="dm+",
-        ema_col_name="smoothdm+",
-        e_alpha=1 / 14,
-    )
-    di_smooth = ema_df(
-        di_plus_df, period, data_column="dm-", ema_col_name="smoothdm-", e_alpha=1 / 14
-    )
-
-    # 4. DX
-    # DX = (abs(+DI(Period) - -DI(Period)) )  /  (abs(+DI(Period) + -DI(Period)))
-
-    dx_df = di_smooth.withColumn(
-        "dx",
-        (
-            func.try_divide(
-                (func.abs((col("smoothdm+") - col("smoothdm-")))),
-                (func.abs((col("smoothdm+") + col("smoothdm-")))),
-            )
-        )
-        * 100,
-    )
-
-    # 5. ADX
-    # first ADX = average of first Period DX values
-    # ADX = ((PrevADX * (Period - 1)) + DX) / Period
-    adx_df_output = ema_df(
-        dx_df, period, period, "dx", ema_col_name="adx", e_alpha=1 / 14
-    )
-    return adx_df_output
+    return roc
 
 
 # Parabolic SAR
@@ -347,163 +111,259 @@ def adx_df(sparkdf, period):
 #   if close slope - --> SAR = MAX(high Loop Back Period), EP = MIN(low Loop Back Period)
 
 
-def sar_df(sparkdf):
+def sar_df(spark_df: DataFrame, seed_rows: int = 5) -> DataFrame:
+    """
+    seeds sar/ep/td/af for the first seed_rows rows per symbol in spark.
+    sar_math does the row-by-row recursion after that, filling the rows left null here.
+    seed_rows here MUST match seed_rows in sar_math or sar breaks.
+    seed_low/seed_high/row_num/prev_td are scratch, dropped later in build_indicator_inputs.
+    """
 
-    window = Window.partitionBy("symbol").orderBy(col("time_stamp").asc())
-    firstsarwindow = window.rowsBetween(-4, 5)
+    window = _by_symbol()
+    seed_window = window.rowsBetween(-(seed_rows - 1), 0)
 
-    sar_schema = (
-        sparkdf.schema.add("af", DoubleType())
-        .add("lmin", DoubleType())
-        .add("lmax", DoubleType())
-        .add("ep", DoubleType())
-        .add("sar", DoubleType())
-        .add("td", DoubleType())
-        .add("rnum", DoubleType())
-        .add("prevtd", DoubleType())
-    )
-
-    sarvarsdf = sparkdf.withColumns(
+    sar_sdf = spark_df.withColumns(
         {
-            "af": func.lit(0.02),
-            "sar": func.lit(0.0),
-            "td": func.lit(0),
-            "lmin": func.lit(0.0),
-            "lmax": func.lit(0.0),
+            "af": F.lit(0.02),
+            "sar": F.lit(0.0),
+            "td": F.lit(0),
+            "seed_low": F.lit(0.0),
+            "seed_high": F.lit(0.0),
         }
     )
 
-    sarvarsdf = sarvarsdf.withColumn("rnum", func.row_number().over(window))
-    sarvarsdf = sarvarsdf.withColumns(
+    sar_sdf = sar_sdf.withColumn("row_num", F.row_number().over(window))
+    sar_sdf = sar_sdf.withColumns(
         {
-            "lmin": func.when(
-                col("rnum") <= 5, func.min(col("close")).over(firstsarwindow)
+            "seed_low": F.when(
+                F.col("row_num") <= seed_rows, F.min(F.col("low")).over(seed_window)
             ),
-            "lmax": func.when(
-                col("rnum") <= 5, func.max(col("close")).over(firstsarwindow)
+            "seed_high": F.when(
+                F.col("row_num") <= seed_rows, F.max(F.col("high")).over(seed_window)
             ),
         }
     )
-    sarvarsdf = sarvarsdf.withColumn(
+    sar_sdf = sar_sdf.withColumn(
         "td",
-        func.when(
-            col("rnum") <= 5,
-            func.sign((col("close") - ((col("lmin") + col("lmax")) / 2)) / 5),
+        F.when(
+            F.col("row_num") <= seed_rows,
+            F.sign(F.col("close") - ((F.col("seed_low") + F.col("seed_high")) / 2)),
         ),
     )
-    sarvarsdf = sarvarsdf.withColumn(
-        "prevtd", func.when(col("rnum") <= 5, func.lag(col("td")).over(window))
+    sar_sdf = sar_sdf.withColumn(
+        "prev_td",
+        F.when(F.col("row_num") <= seed_rows, F.lag(F.col("td")).over(window)),
     )
-    sarvarsdf = sarvarsdf.withColumn(
+    sar_sdf = sar_sdf.withColumn(
         "td",
-        func.when((col("rnum") <= 5) & (col("td") == 0), col("prevtd")).otherwise(
-            col("td")
-        ),
+        F.when(
+            (F.col("row_num") <= seed_rows) & (F.col("td") == 0), F.col("prev_td")
+        ).otherwise(F.col("td")),
     )
-    sarvarsdf = sarvarsdf.withColumns(
+    sar_sdf = sar_sdf.withColumns(
         {
-            "sar": func.when((col("rnum") <= 5) & (col("td") == 1), col("lmin")).when(
-                (col("rnum") <= 5) & (col("td") == -1), col("lmax")
+            "sar": F.when(
+                (F.col("row_num") <= seed_rows) & (F.col("td") == 1), F.col("seed_low")
+            ).when(
+                (F.col("row_num") <= seed_rows) & (F.col("td") == -1),
+                F.col("seed_high"),
             ),
-            "ep": func.when((col("rnum") <= 5) & (col("td") == 1), col("lmax")).when(
-                (col("rnum") <= 5) & (col("td") == -1), col("lmin")
+            "ep": F.when(
+                (F.col("row_num") <= seed_rows) & (F.col("td") == 1), F.col("seed_high")
+            ).when(
+                (F.col("row_num") <= seed_rows) & (F.col("td") == -1), F.col("seed_low")
             ),
         }
     )
+    return sar_sdf
 
-    sar_df_output = sarvarsdf.groupBy("symbol").applyInPandas(
-        sar_math, schema=sar_schema
+
+def build_indicator_inputs(
+    sparkdf: DataFrame,
+) -> DataFrame:
+    """
+    builds the spark window cols the pandas pass reads:
+    pos_change/neg_change (rsi), true_range (atr), adl (chaikin), dm_plus/dm_minus (adx), sar seed.
+    selects down to only what do_applyInPandas reads plus what the merge writes.
+    the rest is scratch, dropped before applyInPandas so it never ships to pandas.
+    """
+
+    window = _by_symbol()
+    change_df = sparkdf.withColumn(
+        "close_change", F.col("close") - F.lag("close").over(window)
     )
-    return sar_df_output
+    gain_losses_df = change_df.withColumns(
+        {
+            "pos_change": F.when(
+                F.col("close_change") > 0, F.col("close_change")
+            ).otherwise(0),
+            "neg_change": F.abs(
+                F.when(F.col("close_change") < 0, F.col("close_change")).otherwise(0)
+            ),
+        }
+    )
+    true_range_df = gain_losses_df.withColumns(
+        {
+            "prior_close": F.lag(F.col("close")).over(window),
+            "high_low": F.col("high") - F.col("low"),
+            "high_prev_close": F.col("high") - F.col("prior_close"),
+            "low_prev_close": F.col("low") - F.col("prior_close"),
+        }
+    )
+    true_range_df = true_range_df.withColumn(
+        "true_range",
+        F.greatest(
+            F.abs(F.col("high_low")),
+            F.abs(F.col("high_prev_close")),
+            F.abs(F.col("low_prev_close")),
+        ),
+    )
+
+    money_flow_df = true_range_df.withColumns(
+        {
+            "money_flow_mult": F.try_divide(
+                ((F.col("close") - F.col("low")) - (F.col("high") - F.col("close"))),
+                (F.col("high") - F.col("low")),
+            ),
+            "money_flow_volume": F.col("money_flow_mult") * F.col("volume"),
+        }
+    )
+
+    adl_df = money_flow_df.withColumn(
+        "adl", F.sum(F.col("money_flow_volume")).over(window)
+    )
+
+    lag_df = adl_df.withColumns(
+        {
+            "laglow": F.lag("low").over(window),
+            "laghigh": F.lag("high").over(window),
+        }
+    )
+
+    dm_df = lag_df.withColumns(
+        {
+            "dm_plus": F.when(
+                (F.col("high") - F.col("laghigh") > F.col("laglow") - F.col("low"))
+                & (F.col("high") - F.col("laghigh") > 0),
+                F.col("high") - F.col("laghigh"),
+            ).otherwise(0),
+            "dm_minus": F.when(
+                (F.col("laglow") - F.col("low") > F.col("high") - F.col("laghigh"))
+                & (F.col("laglow") - F.col("low") > 0),
+                F.col("laglow") - F.col("low"),
+            ).otherwise(0),
+        }
+    )
+    spark_computed_df = sar_df(spark_df=dm_df)
+    spark_cleaned_df = spark_computed_df.select(
+        "symbol",
+        "time_stamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "vwap",
+        "trade_count",
+        "sma",
+        "sma_plus",
+        "sma_minus",
+        "obv",
+        "roc",
+        "adl",
+        "dm_plus",
+        "dm_minus",
+        "pos_change",
+        "neg_change",
+        "true_range",
+        "sar",
+        "ep",
+        "td",
+        "af",
+    )
+    return spark_cleaned_df
+
+
+def compute_pandas_from_spark(
+    spark_df: DataFrame,
+    ema_period: int,
+    bbands_sma_period: int = 20,
+    bbands_std: float = 2,
+) -> DataFrame:
+    """
+    chains the spark feature builders (obv, bbands, roc, build_indicator_inputs)
+    then runs the per-symbol pandas pass with groupBy(symbol).applyInPandas.
+    schema is built off the projected frame on purpose: applyInPandas matches by position,
+    so it's input cols then the 18 indicators in the order do_applyInPandas adds them.
+    """
+
+    sdf = (
+        spark_df.transform(obv_df)
+        .transform(lambda d: bbands_df(d, bbands_sma_period, bbands_std))
+        .transform(roc_df)
+    )
+    sdf = build_indicator_inputs(sparkdf=sdf)
+    sdf_schema = build_output_schema(input_df=sdf)
+    fin_df = sdf.groupBy("symbol").applyInPandas(
+        lambda d: do_applyInPandas(d, ema_period=ema_period), schema=sdf_schema
+    )
+    return fin_df
 
 
 def call_indicators(
-    spark=None,
-    sparkdf=None,
-    sma_period=20,
-    ema_period=20,
-    emaspan=20,
-    macd_fast=12,
-    macd_slow=26,
-    macd_signal=9,
-    bbandsma_period=20,
-    bbands_std=2,
-    adx_period=14,
-    rsi_period=14,
-):
+    spark: SparkSession | None = None,
+    spark_df: DataFrame | None = None,
+    ema_period: int = 20,
+    bbandsma_period: int = 20,
+    bbands_std: int = 2,
+) -> None:
+    """
+    indicator stage entry point.
+    with no spark_df it reads raw_bars semi-joined to active company_info, is_valid bars only,
+    computes everything, merges into stock_indicator_data on (symbol, time_stamp):
+    matched updates, not matched inserts. writes as a side effect, returns nothing.
+    """
+
     if spark is None:
-        spark = spark_connect()
+        spark = spark_connect("stockalgo-compute-indicator")
 
-    if sparkdf is None:
-        symbols = get_symbols(spark)
-        sparkdf = (
-            spark.table("stockalgo.market.raw_bars")
-            .where((col("is_valid")) & (col("symbol").isin(symbols)))
-            .orderBy(col("symbol").desc(), col("time_stamp").asc())
-        )
+    if spark_df is None:
+        raw_bars_tbl = spark.table("stockalgo.market.raw_bars")
+        comp_info_tbl = spark.table("stockalgo.market.company_info")
+        spark_df = raw_bars_tbl.join(
+            comp_info_tbl,
+            on=(raw_bars_tbl["symbol"] == comp_info_tbl["symbol"])
+            & (comp_info_tbl["active"]),
+            how="left_semi",
+        ).where((F.col("is_valid")))
 
-    indicatordf = (
-        sparkdf.transform(obv_df)
-        .transform(lambda d: sma_sql(d, spark, sma_period))
-        .transform(lambda d: ema_df(d, ema_period, emaspan))
-        .transform(lambda d: macd_df(d, macd_fast, macd_slow, macd_signal))
-        .transform(lambda d: bbands_df(d, spark, bbandsma_period, bbands_std))
-        .transform(lambda d: rsi_df(d, period=rsi_period))
-        .transform(RoC_df)
-        .transform(ad_df)
-        .transform(lambda d: adx_df(d, adx_period))
-        .transform(sar_df)
+    indicatordf = compute_pandas_from_spark(
+        spark_df=spark_df,
+        ema_period=ema_period,
+        bbands_sma_period=bbandsma_period,
+        bbands_std=bbands_std,
     )
 
-    indicatordf = indicatordf.drop(
-        "is_valid",
-        "yesterdayclose",
-        "vsum",
-        "macd12",
-        "macd26",
-        "Lagclose",
-        "StartDate",
-        "EndDate",
-        "closechange",
-        "pos_change",
-        "neg_change",
-        "posrolling",
-        "negrolling",
-        "Lagyesterday",
-        "mfm",
-        "mfv",
-        "laglow",
-        "laghigh",
-        "hl",
-        "hyc",
-        "lyc",
-        "largestcoltoday",
-        "lmin",
-        "lmax",
-        "rnum",
-        "prevtd",
-    )
-    indicatordf = indicatordf.withColumn("middle_bollinger_band", col("sma"))
-    indicatordf = indicatordf.withColumnsRenamed(
-        {
-            "final_vsum": "obv",
-            "signalline": "macd_signal",
-            "histogram": "macd_histogram",
-            "RoC": "roc",
-            "sma+": "upper_bollinger_band",
-            "sma-": "lower_bollinger_band",
-            "dm+": "dm_plus",
-            "dm-": "dm_minus",
-            "smoothdm+": "smooth_dm_plus",
-            "smoothdm-": "smooth_dm_minus",
-            "3dayema": "three_day_ema",
-            "10dayema": "ten_day_ema",
-            "co": "chaikin_ad",
-        }
-    )
     indicatordf.createOrReplaceTempView("new_indicator_data")
-    spark.sql(""" MERGE INTO stockalgo.market.stock_indicator_data AS sia
-    USING new_indicator_data AS nid ON sia.symbol = nid.symbol AND sia.time_stamp = nid.time_stamp
-    WHEN MATCHED THEN UPDATE SET *
-    WHEN NOT MATCHED THEN INSERT *
-              """)
+    spark.sql(""" 
+    MERGE INTO stockalgo.market.stock_indicator_data AS sia 
+    USING new_indicator_data AS nid ON sia.symbol = nid.symbol AND sia.time_stamp = nid.time_stamp 
+    WHEN MATCHED THEN UPDATE SET
+    sia.open = nid.open, sia.high = nid.high, sia.low = nid.low, sia.close = nid.close,sia.volume = nid.volume, 
+    sia.vwap = nid.vwap, sia.trade_count = nid.trade_count, sia.sma = nid.sma, sia.ema = nid.ema, 
+    sia.macd_line = nid.macd_line, sia.macd_signal = nid.signal_line, sia.macd_histogram = nid.histogram, sia.rsi = nid.rsi, 
+    sia.rs = nid.rs, sia.roc = nid.`roc`, sia.obv = nid.obv, sia.atr = nid.atr, sia.adx = nid.adx, 
+    sia.sar = nid.sar, sia.ep = nid.ep, sia.td = nid.td, sia.af = nid.af, sia.upper_bollinger_band = nid.`sma_plus`, 
+    sia.middle_bollinger_band = nid.sma, sia.lower_bollinger_band = nid.`sma_minus`, sia.dm_minus = nid.`dm_minus`, 
+    sia.dm_plus = nid.`dm_plus`, sia.smooth_dm_plus = nid.`smooth_dm_plus`, sia.smooth_dm_minus = nid.`smooth_dm_minus`, sia.adl = nid.adl, 
+    sia.three_day_ema = nid.`three_day_ema`, sia.ten_day_ema = nid.`ten_day_ema`, sia.dx = nid.dx, sia.chaikin_ad = nid.chaikin_ad
+    WHEN NOT MATCHED THEN INSERT 
+    (symbol, time_stamp, open, high, low, close, volume, vwap, trade_count, sma, ema, 
+    macd_line, macd_signal, macd_histogram, rsi, rs, roc, obv, atr, adx, sar, ep, td, af, upper_bollinger_band, middle_bollinger_band, 
+    lower_bollinger_band, dm_minus, dm_plus, smooth_dm_plus, smooth_dm_minus, adl, three_day_ema, ten_day_ema, dx, chaikin_ad) 
+    VALUES (
+    nid.symbol, nid.time_stamp, nid.open, nid.high, nid.low, nid.close, nid.volume, nid.vwap, nid.trade_count,
+    nid.sma, nid.ema, nid.macd_line, nid.signal_line, nid.histogram, nid.rsi, nid.rs, nid.`roc`, nid.obv, nid.atr,
+    nid.adx, nid.sar, nid.ep, nid.td, nid.af, nid.`sma_plus`, nid.sma, nid.`sma_minus`, nid.`dm_minus`, nid.`dm_plus`, nid.`smooth_dm_plus`, 
+    nid.`smooth_dm_minus`, nid.adl, nid.`three_day_ema`, nid.`ten_day_ema`, nid.dx, nid.chaikin_ad)
+    """)

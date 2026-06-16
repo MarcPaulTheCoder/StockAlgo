@@ -176,7 +176,7 @@ def test_avg_rolling_math(
             test_col_name,
             data_col,
             True,
-            0,
+            None,
             1,
             3,
             true_adjust_expected_results,
@@ -195,13 +195,14 @@ def test_ema_math(
     m_periods,
 ):
     results = ema_math(
-        test_pdf,
+        pdf=test_pdf,
         m_periods=m_periods,
         ema_adjust=ema_adjust,
         e_span=e_span,
         ema_col_name=ema_col_name,
         data_column=data_col,
         e_alpha=e_alpha,
+        sort_values=True,
     )
     if expected_results == "na":
         assert pd.isna(results[ema_col_name].iloc[0])

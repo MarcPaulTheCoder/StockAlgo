@@ -1,7 +1,7 @@
 apiVersion: sparkoperator.k8s.io/v1beta2
 kind: SparkApplication
 metadata:
-  name: stockalgo-ingest
+  name: stockalgo-apply-ddl
   namespace: default
 spec:
   arguments:
@@ -44,16 +44,6 @@ spec:
           secretKeyRef:
             name: minio-secret-key
             key: KEY
-      - name: ALPACA_KEY
-        valueFrom:
-          secretKeyRef:
-            name: alpaca-paper-secret
-            key: KEY
-      - name: ALPACA_SECRET
-        valueFrom:
-          secretKeyRef:
-            name: alpaca-paper-secret
-            key: SECRET
       - name: POLARIS_CREDS
         valueFrom:
           secretKeyRef:
@@ -63,20 +53,6 @@ spec:
     memory: "6g"
     serviceAccount: spark-release-spark-operator-spark
   executor:
-    volumeMounts:
-      - name: nfs-stockalgo
-        mountPath: /mnt/data
-    env:
-      - name: AWS_ACCESS_KEY_ID
-        valueFrom:
-          secretKeyRef:
-            name: minio-access-key
-            key: KEY
-      - name: AWS_SECRET_ACCESS_KEY
-        valueFrom:
-          secretKeyRef:
-            name: minio-secret-key
-            key: KEY
-    cores: 4
-    memory: "8g"
-    instances: 4
+    cores: 1
+    memory: "1g"
+    instances: 1

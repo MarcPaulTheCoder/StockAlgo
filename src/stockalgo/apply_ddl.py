@@ -1,4 +1,7 @@
-def apply_ddl(spark, path):
+from pyspark.sql import SparkSession
+
+
+def apply_ddl(spark: SparkSession, path: str) -> None:
     with open(path, "r") as f:
         sql_txt = f.readlines()
 

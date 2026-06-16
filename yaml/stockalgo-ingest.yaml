@@ -6,6 +6,9 @@ metadata:
 spec:
   arguments:
     - "ingest"
+    - "{{ run_id }}"
+    - "2025-01-01"
+    - "38"
   volumes:
     - name: nfs-stockalgo
       nfs:
@@ -44,16 +47,6 @@ spec:
           secretKeyRef:
             name: minio-secret-key
             key: KEY
-      - name: ALPACA_KEY
-        valueFrom:
-          secretKeyRef:
-            name: alpaca-paper-secret
-            key: KEY
-      - name: ALPACA_SECRET
-        valueFrom:
-          secretKeyRef:
-            name: alpaca-paper-secret
-            key: SECRET
       - name: POLARIS_CREDS
         valueFrom:
           secretKeyRef:
@@ -77,6 +70,16 @@ spec:
           secretKeyRef:
             name: minio-secret-key
             key: KEY
+      - name: ALPACA_KEY
+        valueFrom:
+          secretKeyRef:
+            name: alpaca-paper-secret
+            key: KEY
+      - name: ALPACA_SECRET
+        valueFrom:
+          secretKeyRef:
+            name: alpaca-paper-secret
+            key: SECRET
     cores: 4
     memory: "8g"
     instances: 4

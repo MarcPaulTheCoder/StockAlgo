@@ -3,9 +3,9 @@ from alpaca.data.historical import StockHistoricalDataClient
 import os
 
 
-def spark_connect():
+def spark_connect(appName: str) -> SparkSession:
     spark = (
-        SparkSession.builder.appName("alpaca-ingest")
+        SparkSession.builder.appName(appName)
         .config("spark.sql.artifact.rootDirectory", "/tmp/spark-artifacts")
         .config("spark.sql.scripting.enabled", "true")
         .config(
@@ -16,7 +16,7 @@ def spark_connect():
     return spark
 
 
-def dev_spark_integration():
+def dev_spark_integration() -> SparkSession:
     s = (
         SparkSession.builder.master("local[2]")
         .appName("stockalgo-integration")
@@ -41,7 +41,7 @@ def dev_spark_integration():
     return s
 
 
-def alpaca_historical_data_connect():
+def alpaca_historical_data_connect() -> StockHistoricalDataClient:
     client = StockHistoricalDataClient(
         os.getenv(key="ALPACA_KEY"), os.getenv(key="ALPACA_SECRET")
     )

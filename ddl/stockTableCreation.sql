@@ -20,3 +20,8 @@ CREATE TABLE IF NOT EXISTS stock_indicator_data (`symbol` string, `time_stamp` t
 
 CREATE TABLE IF NOT EXISTS company_info (`company` string, `symbol` string, `exchange` string, `asset_type` string, `sector` string, `industry` string, 
     `active` boolean, `active_from` timestamp, `deactivated_from` timestamp) USING iceberg;
+
+CREATE TABLE IF NOT EXISTS run_log (`run_id` string, `run_start` timestamp, `run_end` timestamp, `data_date_from` timestamp, 
+    `data_date_to` timestamp, `data_succeeded` int, `chunk_size` int) USING iceberg;
+
+CREATE TABLE IF NOT EXISTS fail_log (`source` string, `source_ref` string, `symbol` string, `error` string, `error_at` timestamp, `payload` string) USING iceberg;
